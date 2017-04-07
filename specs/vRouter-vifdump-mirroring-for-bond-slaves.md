@@ -15,56 +15,102 @@ List of changes in vRouter application to enhance ‘vifdump’ tool [MUA1] for
 
 ##3.1 “vif --list” command output
 --------
-Enhance output of “vif --list” command to display slave interface attached to a bond interface. With slave interfaces also visible in command output, user will be able to specify a slave interface as interface to be monitored in ‘vifdump’ command.
-
-
-##3.2 No change proposed for "vifdump"
+a. To display slave interfaces attached to a bond interface:
 --------
-No change is proposed in ‘contrail-vrouter/utils/vifdump’ shell script for this enhancement. Current logic in this script shall work as it is even when monitored interface is a slave interface of a bond interface. 
+With slave interfaces also visible in command output, user will be able to specify a slave interface as interface to be monitored in 'vifdump' command.
 
+Slave interfaces shall be shown as follows:
 
-##3.3  Transmitted Packet Monitoring
+    vif0/1/slave3     Bond.slave: vif0/1/slave3 PCI: 0000:00:00.0
+                      Type:Physical HWaddr:00:11:ac:1d:c6:1c IPaddr:0
+
+    vif0/1/slave4     Bond.slave: vif0/1/slave4 PCI: 0000:00:00.1
+                      Type:Physical HWaddr:00:11:ac:1d:c6:1d IPaddr:0
+
+b. To display the monitoring interface opened for monitoring slave interface:
 --------
-In current handling of ‘vifdump’ command, Vif interface manager sends “vr_interface_req” sandesh message to vRouter to add the interface for monitoring, and vRouter DPDK driver then creates a mirror interface (i.e. KNI/tuntap) towards the kernel.
+Monitoring interfaces for slaves shall be shown as follows:
+
+     vif0/4348/slave3  Monitoring: mon1/slave3 for vif0/1/slave3
+                       Type:Monitoring HWaddr:00:11:ac:1d:c6:1c IPaddr:0
+
+     vif0/4347/slave4  Monitoring: mon1/slave4 for vif0/1/slave4
+                       Type:Monitoring HWaddr:00:11:ac:1d:c6:1d IPaddr:0
+
+
+##3.2 Changes in "vifdump" to add/delete the monitoring interfaces for the slaves
+--------
+Most of the Current current logic in this script shall work as it is even when monitored interface is a slave interface of a bond interface. However due to the fact that there is no vif-id and corresponding vif context in vrouter for the slave interfaces therefore the naming convention for slave interfaces had to be improvised accordingly. 
+
+a. Add monitoring interface for a slave interface:
+--------
+Vifdump shall invoke following vif command to add the monitoring interface for a slave (for ex. to add monitoring for a slave vif0/1/slave3):
+
+    => vifdump -i vif0/1/slave3 [tcpdump_arguments]
+
+for above command, vifdump invokes following vif command:
+
+    => vif --add mon1/slave3 --type monitoring --vif 1 --id 4348
+
+b. Delete monitoring interface created for a slave interface:
+--------
+Vifdump shall invoke following vif command to delete the monitoring interface for a slave (for ex. to delete monitoring for a slave vif0/1/slave3):
+
+    => vifdump stop vif0/4348/slave3
+    
+for above command, vifdump invokes following vif command: 
+
+    => vif --delete 4348
+
+##3.3  Monitoring configuration
+--------
+In current handling of 'vifdump' command, Vif interface manager sends 'vr_interface_req' sandesh message to vRouter to add the interface for monitoring, and vRouter DPDK driver then creates a mirror interface (i.e. KNI/tuntap) towards the kernel.
 
 vRouter DPDK driver logic shall be modified to check if the monitored interface is a slave-interface. If not, then existing handling will be used, i.e. enable the monitoring for the interface by marking it in vr_dpdk.monitorings[] array and set its VIF_FLAG_MONITORED flag to true. If yes, a new logic shall be added, which is as follows.
 
-Check whether mirroring is already active for the specified slave interface. If true, then return with error[MUA2] . If above check
-returns false, then call “rte_eth_add_tx_callback” API of DPDK to register a call-back function for the specified slave interface. This call-back function shall be called by DPDK library whenever a packet is transmitted on the slave interface, and the callback function will perform mirroring of the packet data onto the KNI/Tuntap interface towards the kernel.
+a. Add an entry in a new global array 'slave_monitorings[]' which will maintain the vif-id of the monitoring interface indexed on the ethernet port-id of the slave port. This is done this way because there is no vif-context in vrouter for the slave interface.
 
-At the time of Tx packet processing—
-
-a. As per existing handling vRouter application calls the rte_port_ethdev_writer_tx API of DPDK to transmit the packet over a bond interface. This API in turn calls rte_eth_tx_burst API for the bond interface. 
-
-b. DPDK PMD bond driver then decides which slave interface to use for transmitting the package based on the configured bonding mode. Finally for the selected slave interface, rte_eth_tx_burst API is called. 
-
-c. When rte_eth_tx_burst API is called for a slave interface which was being monitored then it would have a “pre_tx_burst_cbs” callback registered as explained above. The pre_tx_burst_cbs function will mirror the packet towards the KNI/Tuntap mirror interface in same way as currently done in “dpdk_if_tx” function.
+b. Call 'rte_eth_add_tx_callback' and 'rte_eth_add_rx_callback' APIs of DPDK to register RX and TX call-back functions for the specified slave interface. This call-back function shall be called by DPDK library whenever a packet is transmitted or received on the slave interface, and the callback function will perform mirroring of the packet data onto the KNI/Tuntap interface towards the kernel.
 
 
-##3.4   Received Packet Monitoring
+##3.4  Transmitted Packet Monitoring
 --------
+a. As per existing handling vRouter application calls the 'rte_port_ethdev_writer_tx' API of DPDK to transmit the packet over a bond interface. This API in turn calls 'rte_eth_tx_burst' API for the bond interface. 
+
+b. DPDK PMD bond driver then decides which slave interface to use for transmitting the package based on the configured bonding mode. Finally for the selected slave interface, 'rte_eth_tx_burst' API is called. 
+
+c. When 'rte_eth_tx_burst' API is called for a slave interface which was being monitored then it would have a 'pre_tx_burst_cbs' callback registered as explained above. The pre_tx_burst_cbs function will mirror the packet towards the KNI/Tuntap mirror interface in same way as currently done in 'dpdk_if_tx' function.
+
+
+##3.5   Received Packet Monitoring
+--------
+a. As per existing handling, DPDK PMD bond driver calls 'rte_eth_rx_burst' API for each of the slave interfaces of a bond. The slave which was being monitored would have a 'post_rx_burst_cbs' callback registered as explained above.
+
+b. The 'post_rx_burst_cbs' function will mirror the packet towards the KNI/Tuntap mirror interface in same way as currently done in 'dpdk_if_rx' function. 
+
+
+##3.6 Alternatives Design
+--------
+As Rx port (slave port) information is not modified by DPDK bonding driver while handling over collected packet to application, so it is possible to mirror received packet on the basis of slave port on which it has been received without having to register a 'post_rx_burst_cbs' for slave interface. 
+
 In current handling, vRouter application on receiving the packet from DPDK PMD bond driver (i.e. vr_dpdk_lcore_vroute and dpdk_if_rx functions) does the mirroring for the ports which are listed in vr_dpdk.monitorings[] array and have their VIF_FLAG_MONITORED flag set to true.
 
-In the same functions, vRouter shall check if the interface for which packet is received from DPDK PMD bond driver, is configured for monitoring or not. If yes, then it shall do the mirroring of the received packet towards the KNI/Tuntap interface. 
+In the same functions, vRouter could check if the interface for which packet is received from DPDK PMD bond driver, is configured for monitoring or not. If yes, then it could do the mirroring of the received packet towards the KNI/Tuntap interface.
+
+However as there is no vif-context in vrouter for slave interface therefore there was unnecessary complexity in maintaining the monitoring status for the slave interface. Some new mechanism would have been required which would have more code level impacts.
+
+In comparison, as per chosen approach of registering the RX callback function, automatically if a slave port is being monitored and there is some data received on that slave port then call back will get invoked wherein the packet can be mirrored directly without having to make any checks etc.
+
+Pros :  This would have avoided slight overhead to have a call-back function getting called for each receive operation.
+Cons :  Not aligned to the approach followed in transmit path. Moreover this has more impact to code
 
 
-##3.5 Alternatives Design
---------
-In the Rx path, an alternative was to use “rte_eth_add_rx_callback” function to register a “post_rx_burst_cbs” for the monitored slave interface and perform the mirroring in this function. However, as Rx port (slave port) information is not modified by DPDK bonding driver while handling over collected packet to application, so it is possible to mirror received packet on the basis of slave
-port on which it has been received without having to register a “post_rx_burst_cbs” for slave interface. 
-
-Pros – aligned to the approach followed in transmit path
-
-Cons – This avoids the overhead to have a call-back function getting called for each
-receive operation.
-
-
-##3.6 API schema changes 
+##3.7 API schema changes 
 --------
 None
 
 
-##3.7 User workflow impact
+##3.8 User workflow impact
 --------
 a. Impact to “vif” command syntax:   
 --------
@@ -72,9 +118,25 @@ a. Impact to “vif” command syntax:  
          The output shall also display all the slave/member interfaces for a bond interface.    
 
     --Get (Displays a specific interface)
-         The output shall also display all the slave/member interfaces for a bond interface.
-          
-          
+         The get option shall also accept slave/member interfaces for a bond interface.
+
+Slave interfaces shall be shown as follows:
+
+    vif0/1/slave3     Bond.slave: vif0/1/slave3 PCI: 0000:00:00.0
+                      Type:Physical HWaddr:00:11:ac:1d:c6:1c IPaddr:0
+
+    vif0/1/slave4     Bond.slave: vif0/1/slave4 PCI: 0000:00:00.1
+                      Type:Physical HWaddr:00:11:ac:1d:c6:1d IPaddr:0
+
+Monitoring interfaces for slaves shall be shown as follows:
+
+    vif0/4348/slave3  Monitoring: mon1/slave3 for vif0/1/slave3
+                      Type:Monitoring HWaddr:00:11:ac:1d:c6:1c IPaddr:0
+
+    vif0/4347/slave4  Monitoring: mon1/slave4 for vif0/1/slave4
+                      Type:Monitoring HWaddr:00:11:ac:1d:c6:1d IPaddr:0
+
+
 b. No impact to “vifdump” command syntax:
 ---------
 There is no change to the “vifdump” command syntax as such. However, now the user can also specify slave interface as vif to start or stop the monitoring on it.
@@ -90,15 +152,23 @@ There is no change to the “vifdump” command syntax as such. However, now the
     "Example:      
         vifdump -i vif0/1 -nvv"
 
+To Add monitoring interface for a slave interface: Vifdump shall invoke following vif command to add the monitoring interface for a slave (for ex. to add monitoring for a slave vif0/1/slave3):
 
-##3.4 UI Changes
+    => vifdump -i vif0/1/slave3 [tcpdump_arguments]
+    
+To delete monitoring interface created for a slave interface: Vifdump shall invoke following vif command to delete the monitoring interface for a slave (for ex. to delete monitoring for a slave vif0/1/slave3):
+
+    => vifdump stop vif0/4348/slave3
+
+
+##3.9 UI Changes
 --------
 None
 
 
-##3.5 Operations and Notification
+##3.10 Operations and Notification
 --------
-Refer to section #3.3
+Refer to section #3.8
 
 
 #4. Implementation
@@ -107,11 +177,11 @@ Refer to section #3.3
 --------
 ##4.2 Work Items
 --------
-a. Modification in vif interface manager to display slave interfaces in ‘vif -- list’ and ‘vif --get’ commands
+a. Modification in vif interface manager to for displaying slave interfaces as well as any monitoring interfaces created for them  in 'vif -- list' and 'vif --get' commands
 
-b. No changes required in vifdump
+b. Changes in 'contrail-vrouter/utils/vifdump' shell script to account for the naming convention for slave interface. Slave interfaces shall be named as 'vif0/<bond_vif_id>/slave<slave_eth_port_id>'
 
-c. Modifications in vRouter code for monitoring configuration; use “rte_eth_add_tx_callback” function to register a “pre_tx_burst_cbs” for the monitored slave interface whenever vif interface manager asks to add a monitoring interface for a slave interface of a bond. 
+c. Modifications in vRouter code for monitoring configuration; use 'rte_eth_add_tx_callback' and 'rte_eth_add_rx_callback' functions to register a 'pre_tx_burst_cbs' and 'post_rx_burst_cbs' for the monitored slave interface whenever vif interface manager asks to add a monitoring interface for a slave interface of a bond.
 
 d. Modifications in vRouter code to perform the mirroring of Tx packet in the above call-back function towards the KNI/Tuntap interface
 
